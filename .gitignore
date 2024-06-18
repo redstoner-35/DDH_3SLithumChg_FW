@@ -1,0 +1,14 @@
+./Objects/*
+./Listings/*
+*.docx
+*.crf
+*.o
+*.map
+*.hex
+*.htm
+*.d
+*.rcx
+*.sct
+*.axf
+*.dep
+*.lnp
