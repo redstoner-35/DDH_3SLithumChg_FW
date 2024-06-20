@@ -8,7 +8,7 @@
 
 //版本信息
 #define FWMajorVer 2
-#define FWMinorVer 1
+#define FWMinorVer 2
 
 typedef enum
   {
@@ -36,7 +36,44 @@ static int MenuSwitchtimer=0; //菜单切换定时器
 static int QCSetMenu=0; //默认设置的快充项目
 int ConnectTimeoutCNT=-1; //连接失败定时器
 void ForceShutOff(void); //外部关机函数
-		
+static volatile bool IsSystemWakedup=true; //标志位，系统是否已经退出睡眠状态	
+
+//效率滤波函数
+static float EfficiencyFilter(float IN)
+  {
+	static float sumbuf=0,min=2000,max=-2000;
+	static int sumcount=0;
+	static float result=0;
+	//计数次数超了
+	if(sumcount>20)
+	  {
+		min=2000;
+		max=-2000;
+		sumcount=0;
+		sumbuf=0; //复位缓冲区
+		}
+	//计数次数已到
+	else if(sumcount==20)
+	  {
+		sumbuf-=min+max; //去掉一个最低+最高			
+		result=sumbuf/=18; //除以剩下的结果
+		sumbuf=0;
+		sumcount=0;
+		min=-2000;
+		max=2000;	 //复位缓冲区
+		}
+  //计数次数未到，开始累加	
+	else if(IN<=98&&IN>=10)
+	  {
+		if(IN>max)max=IN;
+		if(IN<min)min=IN; //最大最小值采用
+		sumbuf+=IN; //加上输入的数值
+		sumcount++; //累加次数+1
+		}
+	//计算结束，返回结果
+	return result;
+	}
+	
 //恢复开场动画检测
 void ResetConfigDetection(void)
   {
@@ -162,11 +199,14 @@ void RestoreMenuStateBeforeSleep(void)
 //菜单按键处理主函数
 void MenuKeyHandler(void)
   {
-	int Click=getSideKeyShortPressCount(true);
+	int Click;
 	int power;
   bool SaveFailed;
   bool IsTypeCOK=false;
 	QuickChargeCtrlDef QCtrl;
+	//获取短按次数、判断当前系统是否睡眠,然后获取type-C的状态	
+	Click=getSideKeyShortPressCount(true);
+	if(!IsSystemWakedup)return; //睡眠状态下不处理按键操作
 	IP2368_GetTypeCConnectedState(&IsTypeCOK);
 	//状态机
 	switch(MenuState)
@@ -510,7 +550,8 @@ static void MenuRenderHandler(void)
 		//固件信息	
 		case Menu_About:
 			OLED_Printf(0,0,127,1,"V%d.%d DATE:%s %s",FWMajorVer,FWMinorVer,__DATE__,__TIME__);	 
-			OLED_Printf(1,26,127,1,"D8B-%dSPD3.0",Config.BatteryCount);
+		  OLED_Printf(0,18,127,1,"PSV:1.%s",EnableXARIIMode?"63":"2");
+		  OLED_Printf(0,24,127,1,"D8B-%dSPD3.0",Config.BatteryCount);
 		  break;
 		//设置菜单
 		case Menu_Settings:
@@ -692,13 +733,19 @@ static void MenuRenderHandler(void)
 			 if(BattState.BattState==Batt_discharging)Efficiency=TypeCState.BusPower/fabsf(BattState.BatteryCurrent*BattState.BatteryVoltage); //放电，使用输出除以输入得到效率
 			 else Efficiency=fabsf(BattState.BatteryCurrent*BattState.BatteryVoltage)/TypeCState.BusPower; //充电，使用输入除以输出得到效率
 			 Efficiency*=100; //转为百分比
+			 if(IsTypeCOK)Efficiency=EfficiencyFilter(Efficiency); //将效率数据加入到计算范围内		 
 			 if(!IsTypeCOK||Efficiency>98||Efficiency<10)OLED_Printf(4,25,127,1,"-- %%");
-			 else OLED_Printf(4,25,127,1,"%d%%",iroundf(Efficiency)); //如果效率异常或者TypeC没链接则显示无效率数据
+			 else OLED_Printf(4,25,127,1,"%d%%",iroundf(Efficiency));//如果效率异常或者TypeC没链接则显示无效率数据				
 			 //Typec接口状态
 			 OLED_Printf(39,9,127,1,"%s",IsDisEN?"DRP":"DFP");
 		   //放电MOSFET状态
 			 OLED_Printf(39,16,127,1,"MOS");
 			 OLED_Printf(VBUSMOSEN?43:39,22,127,1,VBUSMOSEN?"ON":"OFF");
+			 OLED_DrawLine(35,18,38,18,1);
+			 OLED_DrawLine(57,18,59,18,1);
+			 OLED_DrawLine(35,18,35,29,1);
+			 OLED_DrawLine(59,18,59,29,1);
+			 OLED_DrawLine(35,29,60,29,1); //外围的框
 			 break;
 	  //TypeC子菜单
 	  case Menu_TypeC:
@@ -737,7 +784,7 @@ static void MenuRenderHandler(void)
 			   {
 				 OLED_Printf(44,11,127,1,"HC");
 				 OLED_DrawRectangle(41,9,57,17,1);
-				 HCCurrent=iroundf(TypeCState.BusCurrent);
+				 HCCurrent=iroundf(fabsf(TypeCState.BusCurrent));
 				 if(HCCurrent>5)HCCurrent=7;
 				 else if(HCCurrent>3)HCCurrent=4;
 				 else if(HCCurrent>2)HCCurrent=3; //协议识别部分
@@ -806,12 +853,13 @@ void MenuInit(void)
 	CurrentBrightness=0x7F; //初始化的目标亮度			
 	do
 	  {
+		MenuKeyHandler();//完成菜单操作的按键处理
 		MenuRenderHandler();//执行菜单渲染
 	  OLED_Refresh(); 
 		if(CurrentBrightness<BrightNess)CurrentBrightness++;
 		if(CurrentBrightness>BrightNess)CurrentBrightness--;
 		OLED_SetBrightness(CurrentBrightness);
-    delay_ms(30); //做一个亮度逐渐变化的特效
+    delay_ms(10); //做一个亮度逐渐变化的特效
 		}
 	while(CurrentBrightness!=BrightNess);
 	}
@@ -844,12 +892,17 @@ void MenuHandler(void)
 			OLED_DrawLine(0,32-i,63,32-i,1); //消失线
 			OLED_Refresh(); 
 			}	
+		//复位按键
+		getSideKeyShortPressCount(true);
+		while(getSideKeyHoldEvent())SideKey_LogicHandler(); //等待按键放开
+		IsSystemWakedup=true; //成功退出睡眠，此时系统对按键操作进行处理
 		}
 	//当前定时器处于正常渲染阶段
 	if(SleepTimer>0)MenuRenderHandler();//执行菜单渲染
 	//时间到，播放菜单消失特效
 	else if(SleepTimer==0)	 
 	  {
+		IsSystemWakedup=false; //标记系统已进入睡眠
 		SleepTimer=-1; //标记结束计数
 		OLED_OldTVFade();//播放老电视消失特效
 	  }

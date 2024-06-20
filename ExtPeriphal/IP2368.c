@@ -193,6 +193,7 @@ bool IP2368_GetBatteryState(BatteryStatuDef *BatteryState)
   {
   char buf;
 	unsigned short ADCWord;
+	static bool IsStillCCCharge=false;
 	//获取电池电压
 	do
 	{			
@@ -224,8 +225,14 @@ bool IP2368_GetBatteryState(BatteryStatuDef *BatteryState)
 	if(!IP2368_ReadReg(0x31,&buf))return false; //STATE-CTL0
 	if(buf&0x08)BatteryState->BattState=Batt_discharging; //输出已启用，电池正在向外放电
 	else BatteryState->BattState=(BatteryStateDef)(buf&0x07); //获取电池状态
-	if(BatteryState->BattState==Batt_CVCharge&&BatteryState->BatteryCurrent>1.0)
-		BatteryState->BattState=Batt_CCCharge; //如果电池当前电流大于1.0A且处于CV充电状态，则视为CC充电状态
+	if(BatteryState->BattState==Batt_CVCharge) //当前IP2368处于恒压模式，开始根据电流阈值判断是否位于恒流
+	  {
+		if(!IsStillCCCharge&&BatteryState->BatteryCurrent>2.65)
+		   IsStillCCCharge=true;  //当前电流值大于2.65A，仍然处于恒流充电阶段
+		else if(IsStillCCCharge&&BatteryState->BatteryCurrent<2.1)
+		   IsStillCCCharge=false; //当前电流值小于2.1A，这时候才报告进入恒压充电
+		if(IsStillCCCharge)BatteryState->BattState=Batt_CCCharge; //当前电流仍然过大，报告恒流状态
+		}
   //处理完毕，返回true
   return true;
 	}

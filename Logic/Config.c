@@ -6,6 +6,7 @@
 
 //配置结构体
 SystemConfigStrDef Config;
+extern bool EnableXARIIMode; //内部flag位，是否启用协议版本V1.63的特殊寄存器
 
 //转换充电功率
 int ConvertChagePower(void)
@@ -41,7 +42,7 @@ bool RestoreDefaultCfg(void)
   Config.IsEnableDPDM=true;
 	Config.IsEnableSCP=true;
 	Config.IsEnablePD=true;
-	Config.IsEnable9VPDO=false;
+	Config.IsEnable9VPDO=EnableXARIIMode?true:false; //如果是新版本会自动进行检测
 	Config.IsEnable20VPDO=Config.BatteryCount<3?false:true;
 	Config.Brightness=Screen_MidBright; //最高亮度
 	return SavingConfig(); 

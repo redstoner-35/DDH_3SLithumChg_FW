@@ -52,8 +52,8 @@ int main(void)
  IP2368_GPIOInit();//初始化IP2368的GPIO等
  OLED_Init();//初始化OLED
  DisplaySplash();//显示开场动画
- ResetConfigDetection();//初始化配置
  IP2368_init();//初始化IP2368
+ ResetConfigDetection();//初始化配置
  MenuInit();//对菜单进行初始化
  EnteredMainApp=true; //已进入主APP
  //主循环
