@@ -27,6 +27,9 @@ typedef struct
  bool IsEnableDPDM; //是否启用基于USB D+D-协商的其余快充协议(例如FCP QC AFC等)
  bool IsEnableSCP; //是否启用华为SCP快充
  bool IsEnablePD; //是否启用PD快充
+ bool IsEnable9VPDO; //是否启用9V PDO
+ bool IsEnable20VPDO; //是否启用20W PDO
+ char BatteryCount; //电池节数
  }SystemConfigStrDef;
 
 //外部声明

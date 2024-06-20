@@ -25,6 +25,7 @@ void STATULEDHandler(void)
 	TypeCStatusDef TypeCState;
 	bool State,IsNTCOK,VDState;
 	static bool IsDischargeEnabled=true; //充电包括放电是否使能
+	static bool IsThermalAlertAsserted=false; //是否发生过热警报
 	float TempResult;
 	//获取IP2368状态	
 	State=IP2368_GetBatteryState(&BattState);
@@ -57,7 +58,7 @@ void STATULEDHandler(void)
 	else if(BattState.BattState==Batt_StandBy&&IsMenuAtBatteryTelem())VDState=true; //待机状态且位于电池检测菜单，二极管打开
 	else VDState=true; //二极管打开
 	GPIO_WriteOutBits(VDiode_IOG,VDiode_IOP,VDState?SET:RESET);//设置虚拟二极管状态 
-	//线性温度过热保护控制逻辑和过热暂停逻辑
+	//温度过热保护控制逻辑和过热暂停逻辑
 	if(IsNTCOK)
 	  {
 		//低温保护
@@ -73,5 +74,20 @@ void STATULEDHandler(void)
 			IP2368_SetChargerState(IsDischargeEnabled);	//设置充电功能	
 			IP2368_SetDischarge(IsDischargeEnabled&&Config.IsEnableOutput); //根据是否使能输出来设置放电功能
 			}
+		//过热警报触发后自动下调充电功率
+		State=false;
+		if(!IP2368_GetIsTypeCSrcConnected(&State))return; //IP2368无法通信，退出
+		if(State||IsThermalAlertAsserted==Fault.OTAlert)return; //警报事件未更新,或者当前已放电模式连接，禁止调节
+		IsThermalAlertAsserted=Fault.OTAlert;
+    if(!IsThermalAlertAsserted)return; //事件未触发
+		switch(Config.ChargePower)
+		  {
+			case ChargePower_65W:Config.ChargePower=ChargePower_60W;break;
+			case ChargePower_60W:Config.ChargePower=ChargePower_45W;break;
+			case ChargePower_45W:Config.ChargePower=ChargePower_30W;break;
+			case ChargePower_30W:break;  //自动下调一个档位的充电功率
+			}
+		SavingConfig(); //保存更改后的配置
+    IP2368_SetChargePower(ConvertChagePower()); //设置更新后的充电功率			
 		}
 	}

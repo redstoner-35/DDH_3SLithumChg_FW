@@ -8,7 +8,7 @@
 
 //版本信息
 #define FWMajorVer 2
-#define FWMinorVer 0
+#define FWMinorVer 1
 
 typedef enum
   {
@@ -23,10 +23,12 @@ typedef enum
   Menu_WaitReconnect,
 	Menu_Settings,
 	Menu_Brightness,
-	Menu_About
+	Menu_About,
+	Menu_PSOC_Upgrade,
 	}MenuStateDef;
 	
 //全局变量
+extern bool EnableXARIIMode; //内部flag位，是否启用协议版本V1.63的特殊寄存器
 MenuStateDef MenuState=Menu_TypeC; //菜单状态
 MenuStateDef LastMenuBeforeSleep=Menu_TypeC; //全局变量，用于存储在休眠自动切换之前的目标菜单
 int SleepTimer=OLEDSleepTimeOut*8;  //睡眠定时器
@@ -102,14 +104,16 @@ void DisplaySplash(void)
 	for(i=1;i<12;i++)
 	  {
 		OLED_Clear();
-		OLED_Printfn(1,1,127,i,1,"D8B-3SPD3.0");	
+		if(Config.BatteryCount==0)OLED_Printfn(1,1,127,i,1,"D8B-?SPD3.0");
+		else OLED_Printfn(1,1,127,i,1,"D8B-%dSPD3.0",Config.BatteryCount);	
 		OLED_Refresh(); //刷屏
 		delay_ms(30); //延迟150mS
 		}
 	for(i=1;i<30;i++)
 	  {
 		OLED_Clear();
-		OLED_Printf(1,1,127,1,"D8B-3SPD3.0");
+		if(Config.BatteryCount==0)OLED_Printf(1,1,127,1,"D8B-?SPD3.0");
+		else OLED_Printf(1,1,127,1,"D8B-%dSPD3.0",Config.BatteryCount);
 		OLED_Printfn(1,9,127,i,1,"FW %d.%d BY:REDSTONER35",FWMajorVer,FWMinorVer);	
 		OLED_Refresh(); //刷屏
 		delay_ms(30); //延迟150mS
@@ -167,6 +171,9 @@ void MenuKeyHandler(void)
 	//状态机
 	switch(MenuState)
 	  {
+		//英集芯SoC升级
+		case Menu_PSOC_Upgrade:
+					break;
 		//错误菜单
 		case Menu_WaitReconnect:
 		case Menu_Error:
@@ -208,7 +215,9 @@ void MenuKeyHandler(void)
 				 break;	
 		//快充协议设置菜单
 		case Menu_QuickChargeSet: 
-			  if(Click==1)QCSetMenu=QCSetMenu<2?QCSetMenu+1:0; //单击选择协议
+		    if(Config.BatteryCount<3)Config.IsEnable20VPDO=false; //电池节数小于3节，禁止使用20V PDO
+		    if(!EnableXARIIMode&&Config.IsEnableSCP)Config.IsEnable9VPDO=false; //旧版本固件如果启用SCP则强制禁用9V PDO
+			  if(Click==1)QCSetMenu=QCSetMenu<(Config.BatteryCount>2?4:3)?QCSetMenu+1:0; //单击选择协议
 		    else if(Click==2)
 				  {
 					switch(QCSetMenu) //更新数据
@@ -216,11 +225,15 @@ void MenuKeyHandler(void)
 						case 0:Config.IsEnableDPDM=Config.IsEnableDPDM?false:true;break; //设置DPDM
 						case 1:Config.IsEnablePD=Config.IsEnablePD?false:true;break; //设置PD
 						case 2:Config.IsEnableSCP=Config.IsEnableSCP?false:true;break; //设置SCP
+						case 3:Config.IsEnable9VPDO=Config.IsEnable9VPDO?false:true;break; //设置9V PDO是否启用
+						case 4:Config.IsEnable20VPDO=Config.IsEnable20VPDO?false:true;break; //设置20V PDO是否启用
 						}
 					//设置协议
 					QCtrl.IsEnableDPDM=Config.IsEnableDPDM;
 	        QCtrl.IsEnablePD=Config.IsEnablePD;
 	        QCtrl.IsEnableSCP=Config.IsEnableSCP;
+					QCtrl.IsEnable9VPDO=(!EnableXARIIMode&&Config.IsEnableSCP)?false:Config.IsEnable9VPDO;
+					QCtrl.IsEnable20VPDO=Config.BatteryCount<3?false:Config.IsEnable20VPDO;
 	        if(!IP2368_SetQuickchargeState(&QCtrl))MenuState=Menu_Error; //尝试保存协议
 					}
 				else if(getSideKeyLongPressEvent()) //长按保存退出
@@ -240,12 +253,17 @@ void MenuKeyHandler(void)
 					}
 		    break;
 		//充电功率设置菜单
-	  case Menu_ChargePower:
+	  case Menu_ChargePower:	
+	      if(Config.BatteryCount<3)		
+				  {
+					if(Config.ChargePower==ChargePower_60W)Config.ChargePower=ChargePower_45W;
+					if(Config.ChargePower==ChargePower_65W)Config.ChargePower=ChargePower_45W; //黑名单机制，如果电池节数小于三节则禁止打开45W以上的挡位
+					}
 		    if(Click==1)switch(Config.ChargePower) //单击选择充电功率
 				  {
 					case ChargePower_65W:Config.ChargePower=ChargePower_30W;break;
 					case ChargePower_60W:Config.ChargePower=ChargePower_65W;break;
-					case ChargePower_45W:Config.ChargePower=ChargePower_60W;break;
+					case ChargePower_45W:Config.ChargePower=Config.BatteryCount<3?ChargePower_30W:ChargePower_60W;break; //如果电池只有2S，则禁止打开45W以上的挡位
 					case ChargePower_30W:Config.ChargePower=ChargePower_45W;break;
 					}
 				else if(Click==2) //双击不保存并退出
@@ -255,8 +273,8 @@ void MenuKeyHandler(void)
 					OLED_Refresh(); 
 					MenuState=Menu_Settings; //回到设置子菜单
 					if(!IP2368_GetChargePower(&power))MenuState=Menu_Error; 
-          else if(power>60)Config.ChargePower=ChargePower_65W;
-          else if(power>45)Config.ChargePower=ChargePower_60W;
+          else if(power>60&&Config.BatteryCount>2)Config.ChargePower=ChargePower_65W;
+          else if(power>45&&Config.BatteryCount>2)Config.ChargePower=ChargePower_60W; //仅有电池大于2节才允许激活60W功率
           else if(power>30)Config.ChargePower=ChargePower_45W;
           else Config.ChargePower=ChargePower_30W; //根据当前充电功率寄存器设置充电功率			
 					delay_Second(1);	
@@ -280,8 +298,8 @@ void MenuKeyHandler(void)
 					OLED_Refresh();
           delay_Second(1);				
           if(!IP2368_GetChargePower(&power))MenuState=Menu_Error; 
-					else if(power>60)Config.ChargePower=ChargePower_65W;
-          else if(power>45)Config.ChargePower=ChargePower_60W;
+					else if(power>60&&Config.BatteryCount>2)Config.ChargePower=ChargePower_65W;
+          else if(power>45&&Config.BatteryCount>2)Config.ChargePower=ChargePower_60W; //仅有电池大于2节才允许激活60W功率
           else if(power>30)Config.ChargePower=ChargePower_45W;
           else Config.ChargePower=ChargePower_30W; //根据当前充电功率寄存器设置充电功率			
 					}
@@ -366,7 +384,7 @@ void MenuKeyHandler(void)
 		    break;
 		//设置菜单
 		case Menu_Settings:
-			 if(Click==1)QCSetMenu=QCSetMenu<4?QCSetMenu+1:0; //单击选择协议
+			 if(Click==1)QCSetMenu=QCSetMenu<5?QCSetMenu+1:0; //单击选择协议
 		   else if(Click==2)
 			   {
 			   switch(QCSetMenu)//双击进入到对应的设置菜单
@@ -376,6 +394,7 @@ void MenuKeyHandler(void)
 						case 2:MenuState=Menu_ChargePower;break;
 					  case 3:MenuState=Menu_Brightness;break;
 					  case 4:MenuState=Menu_About;break;
+					  case 5:MenuState=Menu_PSOC_Upgrade;break;
 						}
 				 QCSetMenu=0; //复位index
 				 }
@@ -473,10 +492,25 @@ static void MenuRenderHandler(void)
 	OLED_Clear();
 	switch(MenuState)
 	  {
+		//PSOC升级	
+	  case Menu_PSOC_Upgrade:
+			   if(!IP2368_SendResetCommand())
+				   {
+					 OLED_Printf(1,1,127,1,"Failed to reset PSoC.");
+					 OLED_Refresh();
+					 delay_Second(2);
+					 MenuState=Menu_Settings; //回到设置子菜单
+					 }
+		     else while(1) //进入死循环
+				   {
+					 OLED_Printf(1,1,127,1,"Entered Upgrade mode.");
+					 OLED_Refresh();
+					 }
+         break;
 		//固件信息	
 		case Menu_About:
 			OLED_Printf(0,0,127,1,"V%d.%d DATE:%s %s",FWMajorVer,FWMinorVer,__DATE__,__TIME__);	 
-			OLED_Printf(1,26,127,1,"D8B-3SPD3.0");
+			OLED_Printf(1,26,127,1,"D8B-%dSPD3.0",Config.BatteryCount);
 		  break;
 		//设置菜单
 		case Menu_Settings:
@@ -509,9 +543,13 @@ static void MenuRenderHandler(void)
 		     if(QCSetMenu==3)OLED_DrawRectangle(5,8,56,16,1);
 					//帮助菜单
 		     y=QCSetMenu==4?17:18;
-		     if(QCSetMenu==6)y-=2; //选中最下面的内容，需要让字符上移2格避免冲突
+		     if(QCSetMenu==5)y-=2; //选中最下面的内容，需要让字符上移2格避免冲突
 		     OLED_Printf(7,y,127,1,"ABOUT");
 		     if(QCSetMenu==4)OLED_DrawRectangle(5,15,56,23,1);					 
+				 //升级菜单
+				 y=QCSetMenu==5?24:25;
+		     OLED_Printf(7,y,127,1,"PSOCUPD");
+		     if(QCSetMenu==5)OLED_DrawRectangle(5,22,56,30,1);
 				 }
 		   break;
 		//快充功率设置菜单
@@ -519,22 +557,47 @@ static void MenuRenderHandler(void)
 			 OLED_Printf(7,1,127,1,"Q. CHARGE");
 		   OLED_DrawLine(1,3,4,3,1);
 		   OLED_DrawLine(58,3,62,3,1);
-		   //绘制DPDM快充状态
-		   y=QCSetMenu==0?10:9;
-		   OLED_Printf(7,y,127,1,"DPDM");
-		   OLED_Printf(38,y,127,1,Qstate.IsEnableDPDM?"ON":"OFF");
-		   if(QCSetMenu==0)OLED_DrawRectangle(5,8,56,16,1);
-		   //绘制PD快充状态
-		   y=QCSetMenu==1?17:18;
-		   if(QCSetMenu==2)y-=2; //选中最下面的内容，需要让字符上移2格避免冲突
-		   OLED_Printf(7,y,127,1,"PD");
-		   OLED_Printf(38,y,127,1,Qstate.IsEnablePD?"ON":"OFF");
-		   if(QCSetMenu==1)OLED_DrawRectangle(5,15,56,23,1);
-		   //绘制SCP快充状态
-		   y=QCSetMenu==2?24:25;
-		   OLED_Printf(7,y,127,1,"SCP");
-		   OLED_Printf(38,y,127,1,Qstate.IsEnableSCP?"ON":"OFF");
-		   if(QCSetMenu==2)OLED_DrawRectangle(5,22,56,30,1);
+			 if(QCSetMenu<3)		//第一个到第三个
+		      {
+		      //绘制DPDM快充状态
+					y=QCSetMenu==0?10:9;
+					OLED_Printf(7,y,127,1,"DPDM");
+					OLED_Printf(38,y,127,1,Qstate.IsEnableDPDM?"ON":"OFF");
+					if(QCSetMenu==0)OLED_DrawRectangle(5,8,56,16,1);
+					//绘制PD快充状态
+					y=QCSetMenu==1?17:18;
+					if(QCSetMenu==2)y-=2; //选中最下面的内容，需要让字符上移2格避免冲突
+					OLED_Printf(7,y,127,1,"PD");
+					OLED_Printf(38,y,127,1,Qstate.IsEnablePD?"ON":"OFF");
+					if(QCSetMenu==1)OLED_DrawRectangle(5,15,56,23,1);
+		   		//绘制SCP 快充状态
+					y=QCSetMenu==2?24:25;
+					OLED_Printf(7,y,127,1,"SCP");
+					OLED_Printf(38,y,127,1,Qstate.IsEnableSCP?"ON":"OFF");
+					if(QCSetMenu==2)OLED_DrawRectangle(5,22,56,30,1);
+         	}
+			else //第四个到第六个
+					{
+					if(Config.IsEnableSCP&&!EnableXARIIMode)
+					  {
+						//绘制PD9V 快充状态
+						y=QCSetMenu==3?10:9;
+						OLED_Printf(7,y,127,1,"9VPDO");
+						OLED_Printf(43,y,127,1,Qstate.IsEnable9VPDO?"ON":"OFF");
+						if(QCSetMenu==3)OLED_DrawRectangle(5,8,61,16,1);
+						}
+					else if(QCSetMenu==3)QCSetMenu=4; //使选项不可选中
+				  //绘制20V PDO状态
+					if(Config.BatteryCount>2) //电池有2节以上则才允许开启20V PDO
+					  {
+						y=QCSetMenu==4?17:18;
+						if(QCSetMenu==5)y-=2; //选中最下面的内容，需要让字符上移2格避免冲突
+						OLED_Printf(7,y,127,1,"20VPD");
+						OLED_Printf(43,y,127,1,Qstate.IsEnable20VPDO?"ON":"OFF");
+						if(QCSetMenu==4)OLED_DrawRectangle(5,15,61,23,1);
+						}
+					else if(QCSetMenu==4)QCSetMenu=1; //使选项不可选中
+					}
 		   break;	
 		//等待连接菜单
 		case Menu_WaitReconnect:
@@ -569,14 +632,17 @@ static void MenuRenderHandler(void)
 			 OLED_Printf(2,1,127,1,"CHARGE PWR.");
 		   OLED_Printf(9,11,127,1,"30W");
 		   OLED_Printf(9,22,127,1,"45W");
-		   OLED_Printf(38,11,127,1,"60W");
-		   OLED_Printf(38,22,127,1,"65W");
+			 if(Config.BatteryCount>2) //如果电池节数大于2节才显示45W以上的挡位
+			   {				 
+				 OLED_Printf(38,11,127,1,"60W");
+				 OLED_Printf(38,22,127,1,"66W");
+				 }
 		   switch(Config.ChargePower) //显示当前选择的充电功率
 			   {
 				 case ChargePower_30W:OLED_DrawRectangle(7,9,27,17,1);break;
 				 case ChargePower_45W:OLED_DrawRectangle(7,20,27,28,1);break;
-				 case ChargePower_60W:OLED_DrawRectangle(36,9,56,17,1);break;
-				 case ChargePower_65W:OLED_DrawRectangle(36,20,56,28,1);break; 
+				 case ChargePower_60W:if(Config.BatteryCount>2)OLED_DrawRectangle(36,9,56,17,1);break;
+				 case ChargePower_65W:if(Config.BatteryCount>2)OLED_DrawRectangle(36,20,56,28,1);break; 
 				 }
 			 break;
 		//Type-C模式菜单
@@ -614,7 +680,7 @@ static void MenuRenderHandler(void)
 					}
 			 else OLED_Printf(4,9,127,1,"-- \x7C",iroundf(TempResult)); //温度未知
 			 //显示功率		
-			 if(IsTypeCSrcOK)OLED_Printf(4,17,127,1,Config.IsEnableOutput?"P60W":"OFF");		//Type-C source模式握手，指示功率为固定60W		
+			 if(IsTypeCSrcOK)OLED_Printf(4,17,127,1,Config.IsEnableOutput?"P%sW":"OFF",Config.IsEnable20VPDO?"60":"45");		//Type-C source模式握手，指示功率为固定45或者60W		
 			 else OLED_Printf(4,17,127,1,"P%dW",ChargePower); //显示当前充电功率
 			 //计算效率
 			 if(BattState.BattState==Batt_discharging)IsTypeCOK=true;		

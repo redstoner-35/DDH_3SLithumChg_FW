@@ -1,8 +1,10 @@
 #include "Config.h"
 #include "delay.h"
 
+//配置字节所在区域
 #define ConfigADDR 0xFC00
 
+//配置结构体
 SystemConfigStrDef Config;
 
 //转换充电功率
@@ -34,11 +36,13 @@ char ConvertBrightLevel(void)
 //恢复默认配置
 bool RestoreDefaultCfg(void)
   {
-  Config.ChargePower=ChargePower_65W;
+	Config.ChargePower=Config.BatteryCount<3?ChargePower_45W:ChargePower_65W;
 	Config.IsEnableOutput=true;
   Config.IsEnableDPDM=true;
 	Config.IsEnableSCP=true;
 	Config.IsEnablePD=true;
+	Config.IsEnable9VPDO=false;
+	Config.IsEnable20VPDO=Config.BatteryCount<3?false:true;
 	Config.Brightness=Screen_MidBright; //最高亮度
 	return SavingConfig(); 
 	}
@@ -61,6 +65,11 @@ bool SavingConfig(void)
 	sbuf=(unsigned int)Config.Brightness; 
 	sbuf&=0x03;
 	data|=sbuf<<8;	 //bit8-9 屏幕亮度	
+	if(Config.IsEnable9VPDO)data|=0x400; //bit 10 是否使能9V PDO
+	if(Config.IsEnable20VPDO)data|=0x800; //bit 11 是否使能20V PDO
+	sbuf=(unsigned int)Config.BatteryCount;
+	sbuf&=0x07;
+	data|=sbuf<<12; //bit12-14 电池节数	
 	//简单的校验
 	sbuf=data;
 	for(i=0;i<30;i++)
@@ -91,6 +100,7 @@ void ReadConfig(void)
 	bool CheckSumError=true;
 	unsigned int sbuf,checksum;
 	int i,zerocount=0;
+	bool IsIllegalConfig;
 	//校验数据
 	sbuf=*((u32 *)ConfigADDR); //读取数据
   for(i=0;i<30;i++)
@@ -116,14 +126,26 @@ void ReadConfig(void)
 		Config.IsEnableDPDM=(*((u32 *)ConfigADDR)&0x20)?true:false; //bit 5 是否使能DPDM快充
 		Config.IsEnableSCP=(*((u32 *)ConfigADDR)&0x40)?true:false; //bit 6 是否使能SCP快充
 		Config.IsEnablePD=(*((u32 *)ConfigADDR)&0x80)?true:false;	//bit 7 是否使能PD快充	 
-		}
+		Config.IsEnable9VPDO=(*((u32 *)ConfigADDR)&0x400)?true:false; //bit 10 是否使能9V PDO
+		Config.IsEnable20VPDO=(*((u32 *)ConfigADDR)&0x800)?true:false; //bit 11 是否使能20V PDO
+		sbuf=(*((u32 *)ConfigADDR)>>12)&0x07; 
+		Config.BatteryCount=(char)sbuf; //bit12-14 电池节数	
+		//进行配置合法性判断
+		if(Config.BatteryCount<3&&Config.ChargePower==ChargePower_60W)IsIllegalConfig=true;	
+		else if(Config.BatteryCount<3&&Config.ChargePower==ChargePower_65W)IsIllegalConfig=true;	 //只有2节电池的情况下充电功率大于60W
+		else if(Config.BatteryCount<3&&Config.IsEnable20VPDO)IsIllegalConfig=true; //两节电池下不允许有PDO挡位
+		else IsIllegalConfig=false;		
+		//检测到非法配置，进行修复
+		if(IsIllegalConfig&&!CheckSumError)
+			{
+			Config.ChargePower=ChargePower_45W; 
+			Config.IsEnable20VPDO=false;
+			SavingConfig(); //保存配置	    		
+			} 
+		}	  
 	//校验和出错，重写数据
 	if(!CheckSumError)return;
-  Config.ChargePower=ChargePower_65W;
-	Config.IsEnableOutput=true;
-  Config.IsEnableDPDM=true;
-	Config.IsEnableSCP=true;
-	Config.IsEnablePD=true;
-	Config.Brightness=Screen_MidBright; //默认使用中等亮度
-	SavingConfig(); //恢复默认
+	Config.BatteryCount=0; //电池节数为0
+  RestoreDefaultCfg(); //恢复默认配置
+	NVIC_SystemReset(); //重启MCU
 	}

@@ -78,6 +78,8 @@ void TypeCInsertInitHandler(void)
 	QCtrl.IsEnableDPDM=Config.IsEnableDPDM;
 	QCtrl.IsEnablePD=Config.IsEnablePD;
 	QCtrl.IsEnableSCP=Config.IsEnableSCP;
+	QCtrl.IsEnable9VPDO=Config.IsEnable9VPDO;
+	QCtrl.IsEnable20VPDO=Config.IsEnable20VPDO;		
 	//重新初始化			
 	IP2368_SetPreChargeEndVoltage(PreCharge_End2V9); //设置预充电结束电压为2.9V
 	if(!IsTypeCSrc)

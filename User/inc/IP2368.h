@@ -81,6 +81,8 @@ typedef struct
  bool IsEnableDPDM; //是否启用基于USB D+D-协商的其余快充协议(例如FCP QC AFC等)
  bool IsEnableSCP; //是否启用华为SCP快充
  bool IsEnablePD; //是否启用PD快充
+ bool IsEnable9VPDO; //是否启用9V PDO快充
+ bool IsEnable20VPDO; //是否启用20V PDO快充
  }QuickChargeCtrlDef;	
  
 typedef struct
@@ -129,6 +131,7 @@ bool IP2368_SetLowVoltAlert(LVAlertDef LowVolt);
 bool IP2368_SetQuickchargeState(QuickChargeCtrlDef *QCState);	
 bool IP2368_SetChargeParam(int IChargeEnd,RechargeModeDef RechargeThr);	
 bool IP2368_SetOTPReloadFlag(void);	
+bool IP2368_SendResetCommand(void);	
 	
 //读取寄存器函数
 bool IP2368_GetBatteryState(BatteryStatuDef *BatteryState);

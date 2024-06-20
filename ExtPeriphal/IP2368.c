@@ -6,9 +6,13 @@
 #include "LEDMgmt.h"
 #include "Config.h"
 
+//内部全局变量
+bool EnableXARIIMode = false; //内部flag位，是否启用协议版本V1.63的特殊寄存器
+
 //IP2368读取寄存器
 static bool IP2368_ReadReg(char RegAddr,char *Result)
   {
+	char buf;
 	//设置寄存器地址
 	IIC_Start();
 	IIC_Send_Byte(0xEA);
@@ -19,8 +23,10 @@ static bool IP2368_ReadReg(char RegAddr,char *Result)
   IIC_Start();
 	IIC_Send_Byte(0xEB);
 	if(IIC_Wait_Ack())return false; //发送从机地址等待响应
-	*Result=IIC_Read_Byte(0);
-	IIC_Stop(); //读完数据后发送NACK，停止
+	buf=IIC_Read_Byte(0);
+	IIC_Stop(); //读一个字节的数据后发送NACK，停止
+	//数据读取结束，返回结果		
+	if(Result!=NULL)*Result=buf;
 	return true;
 	}
 
@@ -348,7 +354,8 @@ bool IP2368_SetQuickchargeState(QuickChargeCtrlDef *QCState)
 	if(!IP2368_WriteReg(0x0B,buf))return false;			
 	//设置TypeC-CTL17
   if(!IP2368_ReadReg(0x2B,&buf))return false;		
-	buf=QCState->IsEnableSCP?buf&0xFD:buf|0x20; //EN_SRC_9VPDO（SCP快充和9V PDO冲突，需要关闭9V PDO）
+	buf=QCState->IsEnable20VPDO?buf|0x10:0xEF; //EN_SRC_20VPDO
+	buf=QCState->IsEnable9VPDO?buf|0x02:buf&0xFD; //EN_SRC_9VPDO
 	if(!IP2368_WriteReg(0x2B,buf))return false;				
 	//修改完毕，返回true
 	return true;
@@ -367,9 +374,25 @@ bool IP2368_GetQuickchargeState(QuickChargeCtrlDef *QCState)
 	QCState->IsEnableDPDM&=buf&0x40?true:false;//EN_VBUS_srcDPDM
 	QCState->IsEnablePD&=buf&0x20?true:false; //EN_VBUS_srckPD
 	QCState->IsEnableSCP&=buf&0x10?true:false; //EN_VBUS_srcSCP
+	//读取TypeC-CTL17
+  if(!IP2368_ReadReg(0x2B,&buf))return false;		
+	QCState->IsEnable20VPDO=buf&0x10?true:false; //EN_SRC_20VPDO
+	QCState->IsEnable9VPDO=buf&0x02?true:false; //EN_SRC_9VPDO	
 	//检测完毕，返回true
 	return true;
 	}
+
+//生成复位命令
+bool IP2368_SendResetCommand(void)
+  {
+	char buf;
+	//修改SYS-CTL0
+	if(!IP2368_ReadReg(0x00,&buf))return false;
+	buf|=0x40; //set EN_RESETMCU为1使IP2368复位
+	if(!IP2368_WriteReg(0x00,buf))return false;			
+	//操作成功完成
+	return true;
+	}	
 
 //获取Type-C是否连接到输出（Source）模式
 bool IP2368_GetIsTypeCSrcConnected(bool *IsConnected)
@@ -386,7 +409,7 @@ bool IP2368_GetIsTypeCSrcConnected(bool *IsConnected)
 bool IP2368_GetTypeCState(TypeCStatusDef *TypeCStat)
   {
 	char buf;
-	unsigned short ADCWord;
+	unsigned int ADCWord;
 	bool State;
 	//获取输入电压
 	if(!IP2368_ReadReg(0x52,&buf))return false; //VSYSVADC[7:0]
@@ -395,14 +418,34 @@ bool IP2368_GetTypeCState(TypeCStatusDef *TypeCStat)
 	ADCWord|=buf<<8; 
 	TypeCStat->busVoltage=(float)(ADCWord)/1000; //LSB=1mV，转换为V
 	//获取输入功率和电流
-	if(!IP2368_ReadReg(0x74,&buf))return false; //VSYSPOWADC[7:0]
-	ADCWord=(unsigned short)buf&0xFF;
-	if(!IP2368_ReadReg(0x75,&buf))return false; //VSYSPOWADC[15:8]
-	ADCWord|=buf<<8; 
-	TypeCStat->BusPower=(float)(ADCWord)/1000; //LSB=1mW，转换为W	
-  if(!IP2368_ReadReg(0x31,&buf))return false; //STATE-CTL0
-	if(buf&0x08)TypeCStat->BusCurrent=-1*(TypeCStat->BusPower/TypeCStat->busVoltage); //处于放电模式，电流为负
-  else TypeCStat->BusCurrent=TypeCStat->BusPower/TypeCStat->busVoltage; //充电模式，电流为正
+	if(!EnableXARIIMode)	//V1.2版本协议，读取电流寄存器
+	  {
+		if(!IP2368_ReadReg(0x70,&buf))return false; // ISYSIADC[7:0]
+		ADCWord=(unsigned int)buf&0xFF;
+		if(!IP2368_ReadReg(0x71,&buf))return false; // ISYSIADC[15:8]
+		ADCWord|=buf<<8; 
+		if(ADCWord&0x8000) //电池电流为负
+			{
+			ADCWord&=0x7FFF; //去除符号位
+			TypeCStat->BusCurrent=((float)(ADCWord)/1000)*-1; //读数为负，LSB=-1mA，转换为A
+			}
+		else TypeCStat->BusCurrent=(float)(ADCWord)/1000; //读数为正，LSB=1mA，转换为A	
+		TypeCStat->BusPower=fabsf(TypeCStat->BusCurrent)*TypeCStat->busVoltage; //电压和电流绝对值相乘得到功率
+		}
+	else //V1.63版本协议，读取功率寄存器
+	  {		
+		if(!IP2368_ReadReg(0x74,&buf))return false; //VSYSPOWADC[7:0]
+		ADCWord=(unsigned int)buf&0xFF;
+		if(!IP2368_ReadReg(0x75,&buf))return false; //VSYSPOWADC[15:8]
+		ADCWord|=buf<<8; 
+		if(!IP2368_ReadReg(0x76,&buf))return false; //VSYSPOWADC[23:16]
+		ADCWord|=buf<<16; 
+		TypeCStat->BusPower=(float)(ADCWord)/1000; //LSB=1mW，转换为W
+		TypeCStat->BusCurrent=fabsf(TypeCStat->BusPower/TypeCStat->busVoltage); //通过总功率除以电压得到电流
+		}
+	//根据电池是否处于放电状态判断电流显示		
+  if(!IP2368_ReadReg(0x31,&buf))return false; //STATE-CTL0	
+	if(buf&0x08)TypeCStat->BusCurrent*=(float)-1; //处于放电模式，电流为负
 	//获取PD Input状态
 	if(!IP2368_ReadReg(0x34,&buf))return false; //TYPEC-STATE0
 	if((buf&0x60)==0x60) //Type-C处于SRC模式且PD成功握手
@@ -517,10 +560,18 @@ void IP2368_init(void)
 	BatteryStatuDef BatteryState;
   QuickChargeCtrlDef QCtrl;
 	bool Result=false;
-	int retry=0;
-	//开始初始化
+	int retry=0,BattCount;
+	//开始初始化流程检测协议版本
 	OLED_Printf(0,0,64,1,"PSoC Init...");
 	OLED_Refresh();
+  do
+	 {
+	 if(IP2368_ReadReg(0x76,NULL))break;
+	 retry++;
+	 }		
+	while(retry<5); //通过读取0x76寄存器检测协议版本	
+	EnableXARIIMode=(retry==5)?false:true; //如果重试了五次寄存器都无法读取说明芯片为旧版本，此时通过读取电流来得到功率
+  //开始进行电池检测
 	if(!IP2368_GetTypeCConnectedState(&Result)) //尝试进行通信
 	  {
 		OLED_Clear();
@@ -529,7 +580,6 @@ void IP2368_init(void)
 		CurrentLEDIndex=11; //禁止充电器充电失败
 		while(1);
 		}
-	//输入防反接检测
 	if(!IP2368_GetBatteryState(&BatteryState)) //读取电池电压
 	  {
 		OLED_Clear();
@@ -538,7 +588,7 @@ void IP2368_init(void)
 		CurrentLEDIndex=12; //电池遥测失败
 		while(1);
 		}		
-  if(BatteryState.BatteryVoltage<8.1||BatteryState.BatteryVoltage>12.8) //电池电压异常
+  if(BatteryState.BatteryVoltage<5.5||BatteryState.BatteryVoltage>16.9) //电池电压异常
  		{
 		OLED_Clear();
 	  OLED_Printf(0,0,64,1,"Battery");
@@ -547,13 +597,29 @@ void IP2368_init(void)
 		CurrentLEDIndex=3; //红灯常亮
 		while(1);
 		}	
+	if(Config.BatteryCount==0) //电池节数未配置
+	  {
+    if(BatteryState.BatteryVoltage>12.7)BattCount=4;
+		else if(BatteryState.BatteryVoltage>8.5)BattCount=3;
+    else BattCount=2; //根据电压识别电池节数		
+		OLED_Printf(0,6,64,1,"PSoC BattCfg=%dCell",BattCount);
+		OLED_Refresh();
+		delay_Second(1);
+		//开始重新构建配置
+		Config.BatteryCount=BattCount;
+		RestoreDefaultCfg();
+		//重新显示
+		OLED_OldTVFade();
+		OLED_Printf(0,0,64,1,"PSoC Init...");
+	  OLED_Refresh();
+		}			
 	//配置寄存器
 	if(!Result||IsForceWakeUp) //如果是强制唤醒,或者typec未连接，则不执行IP2368的自检
 	  {
-		OLED_Printf(0,6,64,1,"PSoC is Ready.");
+		OLED_Printf(0,6,64,1,"PSoC is Ready,Using V1.%s Protocol.",EnableXARIIMode?"63":"2");
 		OLED_Refresh();		
 		GPIO_SetOutBits(VDiode_IOG,VDiode_IOP);//输出设置为1，打开虚拟二极管
-		delay_ms(500);
+		delay_Second(1);
 		OLED_OldTVFade();		
 		IP2368_SetChargerState(true);	//启用充电模块
 		IP2368_SetDischarge(Config.IsEnableOutput); //按照设置重新启用或者禁用放电模块
@@ -597,6 +663,8 @@ void IP2368_init(void)
 	QCtrl.IsEnableDPDM=Config.IsEnableDPDM;
 	QCtrl.IsEnablePD=Config.IsEnablePD;
 	QCtrl.IsEnableSCP=Config.IsEnableSCP;
+	QCtrl.IsEnable9VPDO=Config.IsEnable9VPDO;
+	QCtrl.IsEnable20VPDO=Config.IsEnable20VPDO;				
 	if(!IP2368_SetQuickchargeState(&QCtrl))
 		{
 		OLED_Clear();
@@ -637,7 +705,7 @@ void IP2368_init(void)
 	  OLED_Refresh();		
 		while(1);
 		}	
-	OLED_Printf(0,6,64,1,"PSoC is Ready.");
+  OLED_Printf(0,6,64,1,"PSoC is Ready,Using V1.%s Protocol.",EnableXARIIMode?"63":"2");
 	OLED_Refresh();	
 	//完成初始化，启用虚拟二极管
 	GPIO_SetOutBits(VDiode_IOG,VDiode_IOP);//输出设置为1，打开虚拟二极管
