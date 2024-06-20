@@ -10,6 +10,9 @@
 #define FWMajorVer 2
 #define FWMinorVer 2
 
+//固件参数配置
+#define EfficiencySampleCount 30
+
 typedef enum
   {
 	Menu_DCDC,
@@ -41,29 +44,30 @@ static volatile bool IsSystemWakedup=true; //标志位，系统是否已经退出睡眠状态
 //效率滤波函数
 static float EfficiencyFilter(float IN)
   {
-	static float sumbuf=0,min=2000,max=-2000;
-	static int sumcount=0;
-	static float result=0;
+	static volatile float sumbuf=0,min=2000,max=-2000;
+	static volatile int sumcount=0;
+	static volatile float result=0;
 	//计数次数超了
-	if(sumcount>20)
+	if(sumcount>EfficiencySampleCount)
 	  {
 		min=2000;
 		max=-2000;
 		sumcount=0;
+		result=0;
 		sumbuf=0; //复位缓冲区
 		}
 	//计数次数已到
-	else if(sumcount==20)
+	else if(sumcount==EfficiencySampleCount)
 	  {
-		sumbuf-=min+max; //去掉一个最低+最高			
-		result=sumbuf/=18; //除以剩下的结果
+		sumbuf-=(min+max); //去掉一个最低+最高			
+		result=sumbuf/=(float)(sumcount-2); //除以剩下的结果
 		sumbuf=0;
 		sumcount=0;
-		min=-2000;
-		max=2000;	 //复位缓冲区
+		min=2000;
+		max=-2000;	 //复位缓冲区
 		}
   //计数次数未到，开始累加	
-	else if(IN<=98&&IN>=10)
+	else if(IN>10&&IN<98)
 	  {
 		if(IN>max)max=IN;
 		if(IN<min)min=IN; //最大最小值采用
@@ -465,8 +469,8 @@ static void MenuRenderHandler(void)
 	static MenuStateDef LastMenu=Menu_TypeC; //出错之前的上个菜单
   const char *BattInfo;
 	bool State,IsNTCOK,IsDisEN,VBUSMOSEN,IsTypeCOK,IsTypeCSrcOK;
-	int HCCurrent,ChargePower,y;
-	float TempResult,Efficiency;
+	int ChargePower,y;
+	float TempResult,HCCurrent,Efficiency;
   //轮询IP2368寄存器获取状态
 	switch(MenuState)	
 	  {
@@ -619,7 +623,7 @@ static void MenuRenderHandler(void)
          	}
 			else //第四个到第六个
 					{
-					if(Config.IsEnableSCP&&!EnableXARIIMode)
+					if(EnableXARIIMode||(!Config.IsEnableSCP&&!EnableXARIIMode))
 					  {
 						//绘制PD9V 快充状态
 						y=QCSetMenu==3?10:9;
@@ -646,7 +650,7 @@ static void MenuRenderHandler(void)
        break;			
 		//错误菜单	
 		case Menu_Error:
-       OLED_Printf(3,9,127,1,"IP2368 Offline!");
+       OLED_Printf(3,9,127,1,"PSOC I2C Offline!");
        break;
 		//屏幕亮度设置菜单
 	  case Menu_Brightness:
@@ -730,11 +734,11 @@ static void MenuRenderHandler(void)
 			 else if(BattState.BattState==Batt_PreChage)IsTypeCOK=true;		
 			 else IsTypeCOK=false; //充电放电过程中才显示效率，平时不显示
 			 BattState.BatteryVoltage+=0.11; //将电压加回来
-			 if(BattState.BattState==Batt_discharging)Efficiency=TypeCState.BusPower/fabsf(BattState.BatteryCurrent*BattState.BatteryVoltage); //放电，使用输出除以输入得到效率
-			 else Efficiency=fabsf(BattState.BatteryCurrent*BattState.BatteryVoltage)/TypeCState.BusPower; //充电，使用输入除以输出得到效率
+			 if(BattState.BattState==Batt_discharging)Efficiency=TypeCState.BusPower/(BattState.BatteryCurrent*BattState.BatteryVoltage); //放电，使用输出除以输入得到效率
+			 else Efficiency=(BattState.BatteryCurrent*BattState.BatteryVoltage)/TypeCState.BusPower; //充电，使用输入除以输出得到效率
 			 Efficiency*=100; //转为百分比
-			 if(IsTypeCOK)Efficiency=EfficiencyFilter(Efficiency); //将效率数据加入到计算范围内		 
-			 if(!IsTypeCOK||Efficiency>98||Efficiency<10)OLED_Printf(4,25,127,1,"-- %%");
+			 Efficiency=IsTypeCOK?EfficiencyFilter(fabsf(Efficiency)):0; //将效率数据加入到滤波器内 	
+			 if(!IsTypeCOK||Efficiency<=10||Efficiency>=98)OLED_Printf(4,25,127,1,"-- %%");
 			 else OLED_Printf(4,25,127,1,"%d%%",iroundf(Efficiency));//如果效率异常或者TypeC没链接则显示无效率数据				
 			 //Typec接口状态
 			 OLED_Printf(39,9,127,1,"%s",IsDisEN?"DRP":"DFP");
@@ -750,7 +754,7 @@ static void MenuRenderHandler(void)
 	  //TypeC子菜单
 	  case Menu_TypeC:
 		   OLED_Printf(0,1,127,1,"TYPEC STAT");
-		   if(!IsTypeCOK) //USB Type-C未连接，提示not connected
+		   if(!IsTypeCOK||TypeCState.busVoltage<4.5) //USB Type-C未连接或者连接了但是没有电压，提示not connected
 			   {
 				 OLED_Printf(21,11,127,1,"NOT");
 				 OLED_Printf(5,19,127,1,"CONNECTED");
@@ -784,11 +788,12 @@ static void MenuRenderHandler(void)
 			   {
 				 OLED_Printf(44,11,127,1,"HC");
 				 OLED_DrawRectangle(41,9,57,17,1);
-				 HCCurrent=iroundf(fabsf(TypeCState.BusCurrent));
+				 HCCurrent=fabsf(TypeCState.BusCurrent); //对电流取绝对值计算功率
 				 if(HCCurrent>5)HCCurrent=7;
 				 else if(HCCurrent>3)HCCurrent=4;
-				 else if(HCCurrent>2)HCCurrent=3; //协议识别部分
-				 OLED_Printf(44,21,127,1,"%dA",HCCurrent);	//显示电流			 
+				 else if(HCCurrent>2)HCCurrent=3; 
+				 else HCCurrent=2; //协议识别部分
+				 OLED_Printf(44,21,127,1,"%dA",iroundf(HCCurrent));	//显示电流			 
 				 }
 			 else //标准充电
 			   {

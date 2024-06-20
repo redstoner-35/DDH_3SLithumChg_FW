@@ -35,7 +35,7 @@ static void IP2368StallRestore(void)
 	int wait;
 	//计时累加部分
 	IPStallTime++;
-	if(IPStallTime>=40) //IP2368掉线大约5秒后开始重试
+	if(IPStallTime>=32) //IP2368掉线大约4秒后开始重试
 	  {
 		IPStallTime=0;  //操作复位，等待下次计时
 		GPIO_InputConfig(IP2368_INT_IOG,IP2368_INT_IOP,ENABLE); 
