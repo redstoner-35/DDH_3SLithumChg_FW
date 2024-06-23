@@ -8,7 +8,7 @@
 
 //版本信息
 #define FWMajorVer 2
-#define FWMinorVer 2
+#define FWMinorVer 3
 
 //固件参数配置
 #define EfficiencySampleCount 30
@@ -428,7 +428,7 @@ void MenuKeyHandler(void)
 		    break;
 		//设置菜单
 		case Menu_Settings:
-			 if(Click==1)QCSetMenu=QCSetMenu<5?QCSetMenu+1:0; //单击选择协议
+			 if(Click==1)QCSetMenu=QCSetMenu<6?QCSetMenu+1:0; //单击选择协议
 		   else if(Click==2)
 			   {
 			   switch(QCSetMenu)//双击进入到对应的设置菜单
@@ -439,6 +439,7 @@ void MenuKeyHandler(void)
 					  case 3:MenuState=Menu_Brightness;break;
 					  case 4:MenuState=Menu_About;break;
 					  case 5:MenuState=Menu_PSOC_Upgrade;break;
+					  case 6:IP2368_DoRSOCCalibration();break;
 						}
 				 QCSetMenu=0; //复位index
 				 }
@@ -580,7 +581,7 @@ static void MenuRenderHandler(void)
 				   }
 			   else if(QCSetMenu==2)QCSetMenu=3;//使选项不能被选中，直接跳到第三个
 				 }
-			 else //第四个到第六个
+			 else if(QCSetMenu<6)//第四个到第六个
 			   {
 				 //绘制屏幕亮度设置
 				 y=QCSetMenu==3?10:9;
@@ -595,6 +596,13 @@ static void MenuRenderHandler(void)
 				 y=QCSetMenu==5?24:25;
 		     OLED_Printf(7,y,127,1,"PSOCUPD");
 		     if(QCSetMenu==5)OLED_DrawRectangle(5,22,56,30,1);
+				 }
+			 else //第六个到第九个
+			   {
+				 //剩余容量校准
+				 y=QCSetMenu==6?10:9;
+		     OLED_Printf(7,y,127,1,"RSOC Cal.");
+		     if(QCSetMenu==6)OLED_DrawRectangle(5,8,56,16,1);
 				 }
 		   break;
 		//快充功率设置菜单

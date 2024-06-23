@@ -122,6 +122,9 @@ typedef struct
 void IP2368_init(void);
 void IP2368_GPIOInit(void);
 
+//特定宏操作函数
+void IP2368_DoRSOCCalibration(void); //进行电量校准
+
 //设置寄存器函数
 bool IP2368_SetDischarge(bool IsDischage);
 bool IP2368_SetPreChargeEndVoltage(PerChargeEndVoltDef EndVolt);
@@ -132,7 +135,8 @@ bool IP2368_SetQuickchargeState(QuickChargeCtrlDef *QCState);
 bool IP2368_SetChargeParam(int IChargeEnd,RechargeModeDef RechargeThr);	
 bool IP2368_SetOTPReloadFlag(void);	
 bool IP2368_SendResetCommand(void);	
-	
+bool IP2368_SetRSOC(int Level);
+
 //读取寄存器函数
 bool IP2368_GetBatteryState(BatteryStatuDef *BatteryState);
 bool IP2368_GetTypeCState(TypeCStatusDef *TypeCStat); 

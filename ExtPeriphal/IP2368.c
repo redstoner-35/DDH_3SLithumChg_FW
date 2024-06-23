@@ -388,7 +388,7 @@ bool IP2368_GetQuickchargeState(QuickChargeCtrlDef *QCState)
 	//检测完毕，返回true
 	return true;
 	}
-
+	
 //生成复位命令
 bool IP2368_SendResetCommand(void)
   {
@@ -425,7 +425,7 @@ bool IP2368_GetTypeCState(TypeCStatusDef *TypeCStat)
 	ADCWord|=buf<<8; 
 	TypeCStat->busVoltage=(float)(ADCWord)/1000; //LSB=1mV，转换为V
 	//获取输入功率和电流
-	if(!EnableXARIIMode)	//V1.2版本协议，读取电流寄存器
+	if(!EnableXARIIMode)do	//V1.2版本协议，读取电流寄存器
 	  {
 		if(!IP2368_ReadReg(0x70,&buf))return false; // ISYSIADC[7:0]
 		ADCWord=(unsigned int)buf&0xFF;
@@ -439,7 +439,8 @@ bool IP2368_GetTypeCState(TypeCStatusDef *TypeCStat)
 		else TypeCStat->BusCurrent=(float)(ADCWord)/1000; //读数为正，LSB=1mA，转换为A	
 		TypeCStat->BusPower=fabsf(TypeCStat->BusCurrent)*TypeCStat->busVoltage; //电压和电流绝对值相乘得到功率
 		}
-	else //V1.63版本协议，读取功率寄存器
+	while(TypeCStat->BusPower>105); //如果读取到的功率值非法则重试
+	else do//V1.63版本协议，读取功率寄存器
 	  {		
 		if(!IP2368_ReadReg(0x74,&buf))return false; //VSYSPOWADC[7:0]
 		ADCWord=(unsigned int)buf&0xFF;
@@ -450,6 +451,7 @@ bool IP2368_GetTypeCState(TypeCStatusDef *TypeCStat)
 		TypeCStat->BusPower=(float)(ADCWord)/1000; //LSB=1mW，转换为W
 		TypeCStat->BusCurrent=fabsf(TypeCStat->BusPower/TypeCStat->busVoltage); //通过总功率除以电压得到电流
 		}
+	while(TypeCStat->BusPower>105); //如果读取到的功率值非法则重试
 	//根据电池是否处于放电状态判断电流显示		
   if(!IP2368_ReadReg(0x31,&buf))return false; //STATE-CTL0	
 	if(buf&0x08)TypeCStat->BusCurrent*=(float)-1; //处于放电模式，电流为负
@@ -536,7 +538,20 @@ bool IP2368_SetOTPReloadFlag(void)
 	//检测完毕
 	return true;
 	}
-	
+
+//设置剩余电量寄存器
+bool IP2368_SetRSOC(int Level)	
+  {
+	char buf;
+  //参数检查	
+	if(Level>100||Level<0)return false;
+	//写入SYS_CTL6
+	buf=(char)Level&0x7F;
+	if(!IP2368_WriteReg(0x06,buf))return false;	 
+	//操作完成
+	return true;
+	}	
+
 //初始化IP2368的GPIO	
 static bool IsForceWakeUp=false; //标记变量，标记是否强制唤醒	
 	
@@ -561,13 +576,61 @@ void IP2368_GPIOInit(void)
 	IP2368_SetDischarge(false);
 	}
 
+//进行RSOC校准
+void IP2368_DoRSOCCalibration(void)
+  {
+	int retry,i;
+	float RSOC,FullVolt,EmptyVolt,LastRSOC[3]={0},delta;
+	BatteryStatuDef BatteryState;
+	//开始校准
+	OLED_Clear();
+	OLED_Printf(0,0,64,1,"RSOC Cal Start...");
+	OLED_Refresh();
+	GPIO_SetOutBits(VDiode_IOG,VDiode_IOP);//输出设置为1，打开虚拟二极管  	
+	retry=0;
+	do
+		{
+		delay_ms(50);
+		if(!IP2368_GetBatteryState(&BatteryState)) //获取电池电压
+		   {
+			 OLED_Printf(0,12,64,1,"Failed,ERR:0");
+	     OLED_Refresh();
+			 delay_Second(1);
+			 return;
+			 }
+		FullVolt=(float)Config.BatteryCount*4.2;	
+		EmptyVolt=(float)Config.BatteryCount*2.8; //计算满电和电池电压	
+		RSOC=(BatteryState.BatteryVoltage-EmptyVolt)/(FullVolt-EmptyVolt); //根据电压数据计算RSOC
+		RSOC*=100; //转成100%
+		//转移采样数据
+		for(i=2;i>0;i--)LastRSOC[i]=LastRSOC[i-1];
+    LastRSOC[0]=RSOC;
+    retry++;
+		//计算三个sample之间的均差
+		delta=0;
+    for(i=0;i<3;i++)delta+=LastRSOC[i];	
+		EmptyVolt=delta/(float)3; //求平均并且暂存一下
+		delta=-2000;
+    for(i=0;i<3;i++)if(delta<fabsf(LastRSOC[i]-EmptyVolt))delta=fabsf(LastRSOC[i]-EmptyVolt); //取均差最大的元素			
+		}
+	while(delta>1.00&&retry<20); //反复采样求RSOC直到三个sample之间的均差小于等于1%容量差
+	if(RSOC<0)RSOC=0;
+  if(RSOC>100)RSOC=100; //数值限幅，因为RSOC只能是0-100%	
+	if(!IP2368_SetRSOC(iroundf(RSOC)))OLED_Printf(0,12,64,1,"Failed,ERR:1");
+	else OLED_Printf(0,12,64,1,"OK,RSOC=%d%%",iroundf(RSOC));//成功完成
+	//操作完毕，更新数据
+	OLED_Refresh();
+	delay_Second(1);	
+	}	
+	
 //初始化IP2368的寄存器之类的
 void IP2368_init(void)
   {
 	BatteryStatuDef BatteryState;
   QuickChargeCtrlDef QCtrl;
 	bool Result=false;
-	int retry=0,BattCount;
+	int retry=0,BattCount,i;
+	float RSOC,FullVolt,EmptyVolt,LastRSOC[3]={0},delta;
 	//开始初始化流程检测协议版本
 	OLED_Printf(0,0,64,1,"PSoC Init...");
 	OLED_Refresh();
@@ -603,7 +666,7 @@ void IP2368_init(void)
 	  OLED_Refresh();		
 		CurrentLEDIndex=3; //红灯常亮
 		while(1);
-		}	
+		}		
 	if(Config.BatteryCount==0) //电池节数未配置
 	  {
     if(BatteryState.BatteryVoltage>12.7)BattCount=4;
@@ -620,6 +683,38 @@ void IP2368_init(void)
 		OLED_Printf(0,0,64,1,"PSoC Init...");
 	  OLED_Refresh();
 		}			
+  //启用虚拟二极管并检测RSOC
+	GPIO_SetOutBits(VDiode_IOG,VDiode_IOP);//输出设置为1，打开虚拟二极管  	
+	retry=0;
+	do
+		{
+		delay_ms(50);
+		IP2368_GetBatteryState(&BatteryState); //获取电池电压
+		FullVolt=(float)Config.BatteryCount*4.2;	
+		EmptyVolt=(float)Config.BatteryCount*2.8; //计算满电和电池电压	
+		RSOC=(BatteryState.BatteryVoltage-EmptyVolt)/(FullVolt-EmptyVolt); //根据电压数据计算RSOC
+		RSOC*=100; //转成100%
+		//转移采样数据
+		for(i=2;i>0;i--)LastRSOC[i]=LastRSOC[i-1];
+    LastRSOC[0]=RSOC;
+    retry++;
+		//计算三个sample之间的均差
+		delta=0;
+    for(i=0;i<3;i++)delta+=LastRSOC[i];	
+		EmptyVolt=delta/(float)3; //求平均并且暂存一下
+		delta=-2000;
+    for(i=0;i<3;i++)if(delta<fabsf(LastRSOC[i]-EmptyVolt))delta=fabsf(LastRSOC[i]-EmptyVolt); //取均差最大的元素			
+		}
+	while(delta>1.00&&retry<20); //反复采样求RSOC直到三个sample之间的均差小于等于1%容量差
+	if(RSOC<0)RSOC=0;
+  if(RSOC>100)RSOC=100; //数值限幅，因为RSOC只能是0-100%	
+	if(!IP2368_SetRSOC(iroundf(RSOC)))	
+	  {
+		OLED_Clear();
+		OLED_Printf(0,0,64,1,"IP2368 SetRSOC ERR.");
+		OLED_Refresh();		
+		while(1);
+		}
 	//配置寄存器
 	if(!Result||IsForceWakeUp) //如果是强制唤醒,或者typec未连接，则不执行IP2368的自检
 	  {
@@ -686,7 +781,7 @@ void IP2368_init(void)
 	  OLED_Printf(0,0,64,1,"IP2368 OTPDCTP ERR.");
 	  OLED_Refresh();		
 		while(1);
-		}				
+		}	
 	//重新启用充电模块
 	retry=0;
   while(retry<300)//反复尝试启用充电模块
@@ -701,7 +796,8 @@ void IP2368_init(void)
 	  OLED_Printf(0,0,64,1,"IP2368 ENCHG ERR.");
 	  OLED_Refresh();		
 		while(1);
-		}	
+		}		
+
 	//设置是否允许放电
 	IP2368_SetDischarge(true);	
 	delay_ms(5);	
@@ -712,11 +808,9 @@ void IP2368_init(void)
 	  OLED_Refresh();		
 		while(1);
 		}	
-  OLED_Printf(0,6,64,1,"PSoC is Ready,Using V1.%s Protocol.",EnableXARIIMode?"63":"2");
+	//所有操作完成，指示成功完成
+	OLED_Printf(0,6,64,1,"PSoC is Ready,Using V1.%s Protocol.",EnableXARIIMode?"63":"2");
 	OLED_Refresh();	
-	//完成初始化，启用虚拟二极管
-	GPIO_SetOutBits(VDiode_IOG,VDiode_IOP);//输出设置为1，打开虚拟二极管
 	delay_Second(1);
 	OLED_OldTVFade();
-	
 	}
